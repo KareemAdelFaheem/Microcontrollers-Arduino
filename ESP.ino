@@ -44,13 +44,22 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", 3600 * 2, 60000);  // GMT+2
 #define _9am 9
 #define _3pm 15
 
-// Daily record variables
+int sent9amFlag = 0;
+int sent3pmFlag = 0;
+
+
+//app control flags
+int ceilingEnableFlag = 0;  // Default = enabled
+int pumpEnableFlag = 0;     // Default = enabled
+
+
+// daily record variables for temp
 float minTemp = 50.0;
 float maxTemp = -10.0;
 float temp9am, temp3pm, hum9am, hum3pm, pressure9am, pressure3pm;
 float prediction;
 
-bool isRaining = false;
+
 int raintoday = 0;
 int lastSentDay = -1;
 
@@ -115,7 +124,14 @@ void setup() {
 
 void loop() {
   timeClient.update();  // Update time from NTP server
-  update_day();
+  // update_day();
+  int today = timeClient.getDay();
+if (today != lastSentDay) {
+  raintoday = 0;  // Reset only once per new day
+  lastSentDay = today;
+  Serial.println("New day started → raintoday reset to 0.");
+}
+
 
   int hours = timeClient.getHours();
   int minutes = timeClient.getMinutes();
@@ -127,16 +143,24 @@ void loop() {
   float hum = dht.readHumidity();
 
 
-  float pressure = bmp.readPressure();
+  float pressure = bmp.readPressure()/1000;
 
 
   
+    if (Firebase.getInt(firebaseData, "/enable_ceiling")) {
+  ceilingEnableFlag = firebaseData.intData();
+  Serial.print("Ceiling Enable = "); Serial.println(ceilingEnableFlag);
+}
 
-  int today = timeClient.getDay();
+if (Firebase.getInt(firebaseData, "/enable_pump")) {
+  pumpEnableFlag = firebaseData.intData();
+  Serial.print("Pump Enable = "); Serial.println(pumpEnableFlag);
+}
+  
 
 
 
-  Firebase.setInt(firebaseData, "/rained_today", raintoday);
+  Firebase.setInt(firebaseData, "/did_it_rain today?", raintoday);
  // updateDailyExtremes(temp);
 
   Firebase.setFloat(firebaseData, "/air_temperature", temp);
@@ -153,42 +177,48 @@ void loop() {
   Serial.println("raintoday: " + String(raintoday));
   
 
-  // Only record at 9 AM
-  if (hours == _9am && minutes == 0) {
-    temp9am = temp;
-    hum9am = hum;
-    pressure9am = pressure;
-    Serial.println(" 9 AM values recorded.");
-  }
+  // Only record at 9 AM once
+if (hours == _9am && minutes == 0 && sent9amFlag == 0) {
+  temp9am = temp;
+  hum9am = hum;
+  pressure9am = pressure;
+  Serial.println("9 AM values recorded.");
+  sent9amFlag = 1;
+}
 
-  // Only send at 3 PM
-  if (hours == _3pm && minutes == 0) {
-    temp3pm = temp;
-    hum3pm = hum;
-    pressure3pm = pressure;
-    Serial.println(" 3 PM values recorded and sending prediction...");
+// Only send at 3 PM once
+if (hours == _3pm && minutes == 0 && sent3pmFlag == 0) {
+  temp3pm = temp;
+  hum3pm = hum;
+  pressure3pm = pressure;
+  Serial.println("3 PM values recorded and sending prediction...");
 
-
-    Serial.printf("minTemp: %.2f, maxTemp: %.2f\n", minTemp, maxTemp);
+  Serial.printf("minTemp: %.2f, maxTemp: %.2f\n", minTemp, maxTemp);
   Serial.printf("hum9am: %.2f, hum3pm: %.2f\n", hum9am, hum3pm);
   Serial.printf("pressure9am: %.2f, pressure3pm: %.2f\n", pressure9am, pressure3pm);
   Serial.printf("temp9am: %.2f, temp3pm: %.2f\n", temp9am, temp3pm);
   Serial.printf("raintoday: %d\n", raintoday);
 
-    prediction = sendPostRequest(
-      minTemp, maxTemp,
-      hum9am, hum3pm,
-      pressure9am, pressure3pm,
-      temp9am, temp3pm,
-      raintoday
-    );
-     Firebase.setInt(firebaseData, "/prediction", prediction);
+  prediction = sendPostRequest(
+    minTemp, maxTemp,
+    hum9am, hum3pm,
+    pressure9am, pressure3pm,
+    temp9am, temp3pm,
+    raintoday
+  );
+  Firebase.setInt(firebaseData, "/prediction", prediction);
 
-  }
+  sent3pmFlag = 1;
+}
 
+// Reset flags if minute is not 0
+if (minutes != 0) {
+  sent9amFlag = 0;
+  sent3pmFlag = 0;
+}
   sendAndReceiveSensorData(prediction);
 
-  delay(2000);  // 2 sec delay
+  delay(5000);  // 5 sec delay
 }
 
 // ========== Helper Functions ========== //
@@ -216,6 +246,7 @@ float sendPostRequest(float mintemp,float maxtemp,float hum9am,float hum3pm,floa
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     http.begin(apiUrl);
+    http.setTimeout(5000);  // 5 seconds timeout
     http.addHeader("Content-type", "application/json");
 
     StaticJsonDocument<200> doc;
@@ -264,22 +295,27 @@ float sendPostRequest(float mintemp,float maxtemp,float hum9am,float hum3pm,floa
 void sendAndReceiveSensorData(int prediction) {
   // Send Prediction to Arduino
   Wire.beginTransmission(I2C_ARDUINO_ADDR);
-  Wire.write(prediction >> 8); Wire.write(prediction & 0xFF);
+ Wire.write(prediction >> 8); 
+ Wire.write(prediction & 0xFF);
+ Wire.write(ceilingEnableFlag); // Send control for ceiling
+ Wire.write(pumpEnableFlag);    // Send control for pump
+
   Wire.endTransmission();
   delay(10);
 
   // Request data from Arduino
   Wire.requestFrom(I2C_ARDUINO_ADDR, 16); // Request 12 bytes
 
-  if (Wire.available() >= 14) {
+  if (Wire.available() >= 16) {
     int rain = (Wire.read() << 8) | Wire.read();
     int soil1 = (Wire.read() << 8) | Wire.read();
     int soil2 = (Wire.read() << 8) | Wire.read();
     int soil3 = (Wire.read() << 8) | Wire.read();
     int distance = (Wire.read() << 8) | Wire.read();
+    int water_pumpFlag = Wire.read();
     int ceiling_status =  Wire.read();
     int tank_flag = Wire.read();
-    int slider_flag = Wire.read();
+    
 
     Serial.println("Received Sensor Data:");
     Serial.printf("Prediction sent: %.2f\n", (float)prediction / 100.0); // Assuming prediction might be scaled
@@ -294,9 +330,12 @@ void sendAndReceiveSensorData(int prediction) {
     Firebase.setFloat(firebaseData, "/soil_sensor_3", soil3);
     Firebase.setInt(firebaseData, "/distance", distance); // Corrected Firebase path for distance
     Firebase.setInt(firebaseData, "/tank_flag", tank_flag);
-    Firebase.setInt(firebaseData, "/slider_flag", slider_flag);
+    Firebase.setInt(firebaseData, "/Ceiling_Status", tank_flag);
+    Firebase.setInt(firebaseData, "/Water_Pump_Status", water_pumpFlag);
 
-    raintoday = rain;
+    if (raintoday != 1) {
+  raintoday = rain;
+}
 
     Serial.printf("Rain Today (stored): %d\n", raintoday);
 
@@ -306,10 +345,4 @@ void sendAndReceiveSensorData(int prediction) {
 }
 
 
-void update_day() {
-  timeClient.update();
-  int currentDay = timeClient.getDay();
-  if (currentDay != lastSentDay) {
-    lastSentDay = currentDay;
-  }
-}
+

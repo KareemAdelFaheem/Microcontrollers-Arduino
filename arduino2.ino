@@ -15,30 +15,38 @@ void setup() {
 
   pinMode(LED_PIN, OUTPUT);
 
-  // Set initial positions
+  // Set initial positions: CLOSED (servo1 = 0, servo2 = 70)
   servo1.write(0);
-  servo2.write(0);
-  digitalWrite(LED_PIN, LOW); // LED OFF
+  servo2.write(70);
+  digitalWrite(LED_PIN, LOW);
 }
 
 void loop() {
-  // Check for UART command
   if (Serial.available()) {
     String command = Serial.readStringUntil('\n');
+    command.trim(); // Remove any trailing newline or whitespace
 
     if (command == "OPEN_SLIDER") {
       openSlider();
+    } 
+    else if (command == "CLOSE_SLIDER") {
+      closeSlider();
     }
   }
 }
 
 void openSlider() {
-  digitalWrite(LED_PIN, HIGH); // Turn on LED while operating
-  servo1.write(90);
-  servo2.write(90);
-  delay(3000);       // Wait to simulate fill time
-  servo1.write(0);
+  // Move to OPEN position: servo1 = 70, servo2 = 0
+  digitalWrite(LED_PIN, HIGH);
+  servo1.write(70);
   servo2.write(0);
-  delay(500);
-  digitalWrite(LED_PIN, LOW); // Turn off LED after motion
+
+}
+
+void closeSlider() {
+  // Move to CLOSED position: servo1 = 0, servo2 = 70
+  digitalWrite(LED_PIN, LOW);
+  servo1.write(0);
+  servo2.write(70);
+ 
 }
